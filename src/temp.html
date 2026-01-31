@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Température temps réel</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    font-family: Arial;
+    background: #0f172a;
+    color: white;
+    text-align: center;
+}
+.container {
+    width: 80%;
+    margin: auto;
+    margin-top: 40px;
+    background: #1e293b;
+    padding: 25px;
+    border-radius: 15px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+}
+canvas {
+    margin-top: 20px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+    <h2>Température — dernières mesures</h2>
+    <canvas id="chart" height="120"></canvas>
+</div>
+
+<div class="container">
+    <h2>Moyenne / Min / Max par heure</h2>
+    <canvas id="chartHour" height="120"></canvas>
+</div>
+
+<script>
+// ========= PARAMETRES =========
+const N = 30;                // nombre de mesures affichées sur le graphique principal
+const REFRESH_TIME = 10000;  // 10 s
+const sheetID = "1flegrhY0TkaYv5bdClt4Is8f_Le2EFK9uJLa0bPMBHo";
+const url = `https://docs.google.com/spreadsheets/d/${sheetID}/gviz/tq?tqx=out:json`;
+
+let chart = null;
+let chartHour = null;
+
+// ---------- LECTURE DONNEES ----------
+async function chargerDonnees() {
+    const res = await fetch(url);
+    const text = await res.text();
+    const json = JSON.parse(text.substring(47, text.length - 2));
+
+    let dates = [];
+    let temperatures = [];
+
+    json.table.rows.forEach(r => {
+        const dateRaw = r.c[0].f || r.c[0].v;
+        const temp = r.c[1].v;
+        dates.push(dateRaw);
+        temperatures.push(temp);
+    });
+
+    return { dates, temperatures };   // ➤ NE COUPE PLUS ICI !
+}
+
+// ---------- PARSE DATE COMPATIBLE FR ----------
+function parseDateSmart(d) {
+    if (d instanceof Date) return d;
+
+    if (typeof d === "string" && d.includes("/")) {
+        const [datePart, timePart = "00:00:00"] = d.split(" ");
+        const [day, month, year] = datePart.split("/").map(n => parseInt(n));
+        const [hh, mm, ss = 0] = timePart.split(":").map(n => parseInt(n));
+        return new Date(year, month - 1, day, hh, mm, ss);
+    }
+
+    return new Date(d);
+}
+
+// ---------- MOYENNE / MIN / MAX PAR HEURE ----------
+function calculStatsHoraire(dates, temperatures) {
+    const group = {};
+
+    for (let i = 0; i < dates.length; i++) {
+        const d = parseDateSmart(dates[i]);
+        if (isNaN(d)) continue;
+
+        const key =
+            d.getFullYear() + "-" +
+            ("0"+(d.getMonth()+1)).slice(-2) + "-" +
+            ("0"+d.getDate()).slice(-2) + " " +
+            ("0"+d.getHours()).slice(-2) + ":00";
+
+        if (!group[key]) group[key] = { sum: 0, count: 0, min: 999, max: -999 };
+
+        group[key].sum += temperatures[i];
+        group[key].count++;
+        group[key].min = Math.min(group[key].min, temperatures[i]);
+        group[key].max = Math.max(group[key].max, temperatures[i]);
+    }
+
+    const labels = Object.keys(group).sort();
+    const avg = labels.map(k => (group[k].sum / group[k].count).toFixed(2));
+    const mins = labels.map(k => group[k].min);
+    const maxs = labels.map(k => group[k].max);
+
+    return { labels, avg, mins, maxs };
+}
+
+// ---------- MISE A JOUR ----------
+async function majGraphique() {
+    const { dates, temperatures } = await chargerDonnees();
+
+    const ctx = document.getElementById("chart").getContext("2d");
+    const ctx2 = document.getElementById("chartHour").getContext("2d");
+
+    // --------- GRAPH 1 : N dernières valeurs seulement ---------
+    let lastDates = dates.slice(-N);
+    let lastTemps = temperatures.slice(-N);
+
+    const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+    gradient.addColorStop(0, "rgba(96,165,250,0.8)");
+    gradient.addColorStop(1, "rgba(96,165,250,0)");
+
+    if (!chart) {
+        chart = new Chart(ctx, {
+            type: "line",
+            data: {
+                labels: lastDates,
+                datasets: [{
+                    label: "Température (°C)",
+                    data: lastTemps,
+                    borderWidth: 3,
+                    borderColor: "#60a5fa",
+                    backgroundColor: gradient,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 3,
+                    pointBackgroundColor: "white"
+                }]
+            },
+            options: {
+                scales: {
+                    y: { min: 0, max: 50, ticks: { color: "white" }},
+                    x: { ticks: { color: "white" }}
+                },
+                plugins: { legend: { labels: { color: "white" } } }
+            }
+        });
+    } else {
+        chart.data.labels = lastDates;
+        chart.data.datasets[0].data = lastTemps;
+        chart.update();
+    }
+
+    // --------- GRAPH 2 : stats sur TOUTES les données ---------
+    const hourly = calculStatsHoraire(dates, temperatures);
+
+    if (!chartHour) {
+        chartHour = new Chart(ctx2, {
+            type: "line",
+            data: {
+                labels: hourly.labels,
+                datasets: [
+                    {
+                        label: "Max (°C)",
+                        data: hourly.maxs,
+                        borderColor: "#ef4444",
+                        backgroundColor: "rgba(239,68,68,0.3)",
+                        fill: "+1",
+                        tension: 0.4
+                    },
+                    {
+                        label: "Min (°C)",
+                        data: hourly.mins,
+                        borderColor: "#22c55e",
+                        backgroundColor: "rgba(34,197,94,0.3)",
+                        fill: "-1",
+                        tension: 0.4
+                    },
+                    {
+                        label: "Moyenne (°C)",
+                        data: hourly.avg,
+                        borderColor: "#fbbf24",
+                        backgroundColor: "transparent",
+                        borderWidth: 3,
+                        tension: 0.4
+                    }
+                ]
+            },
+            options: {
+                scales: {
+                    y: { min: 0, max: 50, ticks: { color: "white" }},
+                    x: { ticks: { color: "white" }}
+                },
+                plugins: { legend: { labels: { color: "white" } } }
+            }
+        });
+    } else {
+        chartHour.data.labels = hourly.labels;
+        chartHour.data.datasets[0].data = hourly.maxs;
+        chartHour.data.datasets[1].data = hourly.mins;
+        chartHour.data.datasets[2].data = hourly.avg;
+        chartHour.update();
+    }
+}
+
+majGraphique();
+setInterval(majGraphique, REFRESH_TIME);
+</script>
+
+</body>
+</html>
